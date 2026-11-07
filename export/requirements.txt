@@ -1,0 +1,8 @@
+# Offline export only. Never install these in the server image.
+torch
+transformers
+onnx
+numpy
+pillow
+einops
+timm
