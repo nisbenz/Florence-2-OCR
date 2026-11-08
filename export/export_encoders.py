@@ -54,17 +54,22 @@ class TextEncoder(torch.nn.Module):
         return hidden_states, attention_mask
 
 
+def load_model():
+    with patch("transformers.dynamic_module_utils.get_imports", get_imports_without_flash_attn):
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, trust_remote_code=True, torch_dtype=torch.float32, attn_implementation="eager"
+        ).eval()
+        processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+    return model, processor
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=Path("models"))
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    with patch("transformers.dynamic_module_utils.get_imports", get_imports_without_flash_attn):
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, trust_remote_code=True, torch_dtype=torch.float32, attn_implementation="eager"
-        ).eval()
-        processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+    model, processor = load_model()
 
     # A blank image is enough for tracing: only the shapes matter here.
     inputs = processor(text="<OCR>", images=Image.new("RGB", (768, 768)), return_tensors="pt")
