@@ -1,3 +1,9 @@
-# Server image. Must never contain torch or transformers.
+# Server image. Must never contain torch.
+# transformers is here only for CLIPImageProcessor, which runs without torch.
 fastapi
 uvicorn
+onnxruntime==1.31.1
+numpy==2.5.4
+pillow==13.0.0
+tokenizers==0.21.4
+transformers==4.49.0
