@@ -4,6 +4,8 @@ Offline only: this is the one place PyTorch is allowed. It writes to models/:
   vision_encoder.onnx  pixel_values (B, 3, 768, 768) -> image_features (B, 577, 768)
   text_encoder.onnx    image_features + prompt_embeds -> encoder_hidden_states, encoder_attention_mask
   ocr_prompt_embeds.npy  embeddings of the fixed <OCR> prompt, computed once here
+  preprocessor_config.json  image preprocessing settings, read by the server
+  tokenizer.json         the original tokenizer, for the `tokenizers` library in the server
 
 The decoder export is not written yet.
 """
@@ -80,6 +82,9 @@ def main():
         image_features = model._encode_image(pixel_values)
 
         np.save(args.out / "ocr_prompt_embeds.npy", prompt_embeds.numpy())
+        # The server builds its CLIPImageProcessor from this file, so it never touches the Hub.
+        processor.image_processor.save_pretrained(args.out)
+        processor.tokenizer.backend_tokenizer.save(str(args.out / "tokenizer.json"))
 
         torch.onnx.export(
             VisionEncoder(model),
