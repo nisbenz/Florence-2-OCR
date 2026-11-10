@@ -41,6 +41,7 @@ def main():
 
     options = ort.SessionOptions()
     options.intra_op_num_threads = args.threads
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")  # as in the server
     p = pl.OcrPipeline(args.models, options, set(args.int8))
     image = Image.open(args.image)
     p([image])  # warm-up

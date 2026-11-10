@@ -25,6 +25,10 @@ Florence-2-base, `<OCR>` task, served on CPU with no PyTorch in the server.
 | 2026-11-10 | Beam search: stop gathering the cross-attention cache per beam and fetching it every step | 100%\* | 2.3 s | 0.56 | ✅ |
 | 2026-11-10 | `session.intra_op.allow_spinning=0` (no spin-waiting under the CPU quota) | 100%\* | 1.2 s | 0.81 | ✅ |
 | 2026-11-10 | `MAX_BATCH=1` instead of 2 (measured, not adopted yet: open decision) | 100%\* | 1.2 s | 0.83 | ⏸ |
+| 2026-11-10 | Decoder graph surgery: cross keys stored transposed, no per-step `Transpose` / `Identity` copies | 100%\* | 0.94 s | 1.06 | ✅ |
+| 2026-11-10 | Separate decoder threads: 1 / 2 / 3 (encoders stay at 4) | 100%\* | 1.08 / 0.98 / 0.95 s | 0.91 / 1.02 / 1.06 | ❌ |
+| 2026-11-10 | Greedy decoding (`NUM_BEAMS=1`) instead of 3 beams | 100%\* | 0.83 s | 1.20 | ❌ |
+| 2026-11-10 | 2 server processes × 2 threads (`WORKERS=2`, `MAX_BATCH=1`) | 100%\* | 1.34 s | 1.13 | ❌ |
 
 \* 6 synthetic images with references from our own PyTorch run (starter repo not released yet).
 `--cpus=4` is a stand-in until the official CPU count is announced. Rows come from
@@ -44,6 +48,112 @@ Florence-2-base, `<OCR>` task, served on CPU with no PyTorch in the server.
   Text now matches PyTorch exactly, alone and batched.
 
 ## Measurements and notes
+
+### The vision encoder (2026-11-10)
+
+It is now about half of a request (0.58 s of ~1.1 s on 4 threads). ORT profile, one image, int8:
+
+| Part | Time |
+|---|---|
+| Stage 0 (192×192 feature map) | 109 ms |
+| Stage 1 | 54 ms |
+| Stage 2 (deepest, most blocks) | 273 ms |
+| Stage 3 | 23 ms |
+| Conv patch embeddings | 37 ms |
+| Other (fused / unnamed nodes) | 95 ms |
+
+Window attention 255 ms and channel attention 204 ms. No single hotspot like the decoder's: the
+largest nodes are three 11 ms Convs, then `DynamicQuantizeMatMul` (≈43% overall) spread over 97
+layers. It is real math, not redundant work.
+
+| Tried | Time | Mean abs diff vs fp32 | Verdict |
+|---|---|---|---|
+| Dynamic int8 (current) | 576 ms | 0.147 | kept |
+| Same, `ORT_ENABLE_EXTENDED` (no NCHWc layout conversions) | 580 ms | 0.146 | ❌ no gain |
+| Weight-only `MatMulNBits` 8-bit | 1031 ms | 0.022 | ❌ slower (kernel built for small-M decoding) |
+| Weight-only `MatMulNBits` 4-bit | 1142 ms | 0.190 | ❌ |
+| Static QDQ int8 (earlier) | 860 ms | — | ❌ |
+| Transformer optimizer fusions (earlier) | 662 ms | — | ❌ |
+
+Note: dynamic int8 is the noisiest of these (mean diff 0.147 vs 0.022 for 8-bit `MatMulNBits`).
+Fine on the synthetic images, but it is the first thing to suspect if accuracy drops on real samples.
+
+**Lower input resolution**, checked in PyTorch before exporting anything (vision time in PyTorch fp32):
+
+| Size | Image tokens | Vision time | Text vs 768 reference (3 synthetic images) |
+|---|---|---|---|
+| 768 | 577 | 1.36 s | identical |
+| 640 | 401 | 0.97 s | 1 of 3 changed (`42.50` → `42:50`) |
+| 576 | 325 | 0.73 s | 3 of 3 changed: lowercased, parts dropped |
+| 512 | 257 | 0.61 s | 3 of 3 changed: whole lines missing |
+
+The model was trained at 768 and its reading degrades fast below it, even on large clean synthetic
+text. A missing line costs far more CER than the time saved. Rejected.
+
+Conclusion: with ONNX Runtime on CPU, the vision encoder is close to its floor here. What's left is
+thread count (it scales with threads, unlike the decoder) on the official CPU count.
+
+### Sustained load, 10 minutes (2026-11-10, Docker `--cpus=4`, concurrency 4)
+
+628 requests, 100% success, 1.04 RPS, 0 errors in the server log. Container memory per minute:
+1.98, 1.98, 1.98, 1.98, 2.00, 1.98, 1.98, 2.00, 1.98, 1.98, 1.98 GB: flat, no leak.
+
+### Experiments that didn't help (2026-11-10)
+
+**Separate decoder thread count.** Before spinning was turned off the decoder got slower with more
+threads, so fewer decoder threads looked promising. With spinning off it doesn't: 3 threads ties 4,
+1–2 are slower. One thread count for everything.
+
+**Static int8 (QDQ) for the vision encoder**, calibrated on the samples, to skip quantizing
+activations on every call (`DynamicQuantizeMatMul` was 43% of the vision encoder):
+860 ms vs 577 ms for dynamic, same error vs fp32. ORT doesn't turn this QDQ pattern into faster
+kernels here. Conv layers are only 44 ms of the vision encoder, so quantizing them wasn't worth trying.
+
+**ORT transformer optimizer** (`onnxruntime.transformers.optimizer`, model_type bert/vit) on the vision
+encoder: fused 24 BiasGelu and 51 SkipLayerNormalization, but no Attention (DaViT's window attention
+doesn't match the pattern). Slower: 1138 vs 1088 ms fp32, 662 vs 580 ms int8. ORT's own load-time
+optimizations (`ORT_ENABLE_ALL`, the default) already do what matters.
+
+**Several server processes** (2 × 2 threads): RPS 1.06 → 1.13, but single-request p50 0.94 → 1.34 s
+(each request gets half the threads), and concurrency 2 gained nothing (0.76 RPS, likely connections
+landing unevenly on the two processes). Not worth the latency on 4 CPUs.
+
+**Continuous batching: not built.** It only pays if a bigger batch raises throughput, and on 4 CPUs
+batch 2 takes exactly twice as long as batch 1. Revisit if the official CPU count is much larger.
+
+**Greedy decoding** is faster (p50 0.94 → 0.83 s, RPS 1.06 → 1.20) and scored 100% here, but the
+synthetic images are easy; greedy can drift from the beam-search reference on real text.
+Decision: always 3-beam search. Accuracy comes before the ~0.1 s.
+
+### Profiling the decoder with ONNX Runtime's profiler (2026-11-10, `bench/ort_profile.py`)
+
+`enable_profiling` on each session, one request, kernel time summed per op type (int8, 4 threads):
+
+| Decoder op | Before | After surgery |
+|---|---|---|
+| `Identity` (648 runs) | 323 ms | gone |
+| `Transpose` | 226 ms (2652 runs) | 47 ms (2322 runs) |
+| `MatMulNBits` (the real work) | 205 ms | 197 ms |
+| Total kernel time inside the branches | ~955 ms | ~467 ms |
+
+(`If` is the container and counts everything inside it, so it's left out of the total.)
+
+Two thirds of the decoder's time wasn't math. In the cached-step branch:
+
+- **12 `Identity` per step** copied the whole cross-attention cache (~65 MB) to the outputs, only
+  because both `If` branches must have the same outputs. Not fetching those outputs (previous fix)
+  didn't stop ORT from computing them.
+- **6 `Transpose` per step** turned each layer's cross key K (batch×12×587×64) into Kᵀ for Q·Kᵀ.
+  The keys never change after prefill, so this redid the same work 55 times per request.
+
+`export/optimize_decoder.py` edits the graph after export: the prefill branch writes the cross keys
+already transposed, the cached branch uses them directly (Transpose deleted) and outputs empty tensors
+instead of copies (Identity → empty Constant). Decoder 0.88 s → 0.39 s per request, request
+1.61 s → 1.11 s (host, 4 threads, spinning off, same files otherwise). Text still identical to PyTorch
+with the fp32 graphs, single and batched.
+
+Lesson: the profiler found what reading the export code didn't. The exporter produces a correct
+graph, not a graph that knows which inputs are constant across calls.
 
 ### The beam-search glue was the cross-attention cache (2026-11-10)
 

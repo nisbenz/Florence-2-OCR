@@ -41,17 +41,18 @@ def banned_ngram_tokens(seq):
 
 
 class Hypotheses:
-    """Finished beams of one image, keeping the best NUM_BEAMS (transformers' BeamHypotheses)."""
+    """Finished beams of one image, keeping the best num_beams (transformers' BeamHypotheses)."""
 
-    def __init__(self):
+    def __init__(self, num_beams: int):
+        self.num_beams = num_beams
         self.beams = []  # (score, token ids)
         self.worst_score = 1e9
 
     def add(self, tokens, sum_logprobs, generated_len):
         score = sum_logprobs / generated_len  # length_penalty = 1.0
-        if len(self.beams) < NUM_BEAMS or score > self.worst_score:
+        if len(self.beams) < self.num_beams or score > self.worst_score:
             self.beams.append((score, tokens))
-            if len(self.beams) > NUM_BEAMS:
+            if len(self.beams) > self.num_beams:
                 worst = min(range(len(self.beams)), key=lambda i: self.beams[i][0])
                 del self.beams[worst]
                 self.worst_score = min(s for s, _ in self.beams)
@@ -63,16 +64,26 @@ class Hypotheses:
 
 
 class OcrPipeline:
-    def __init__(self, models_dir: Path, options: ort.SessionOptions | None = None, int8: set[str] = frozenset()):
-        """int8: graph names ("vision_encoder", "text_encoder", "decoder_merged") to load as <name>.int8.onnx."""
+    def __init__(
+        self,
+        models_dir: Path,
+        options: ort.SessionOptions | None = None,
+        int8: set[str] = frozenset(),
+        decoder_options: ort.SessionOptions | None = None,
+        num_beams: int = NUM_BEAMS,
+    ):
+        """int8: graph names ("vision_encoder", "text_encoder", "decoder_merged") to load as <name>.int8.onnx.
+        decoder_options: separate session options for the decoder (e.g. another thread count).
+        num_beams: 3 matches the reference; 1 is greedy decoding."""
 
-        def session(name):
+        def session(name, opts=options):
             path = models_dir / (f"{name}.int8.onnx" if name in int8 else f"{name}.onnx")
-            return ort.InferenceSession(path, options, providers=["CPUExecutionProvider"])
+            return ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
 
+        self.num_beams = num_beams
         self.vision = session("vision_encoder")
         self.text_encoder = session("text_encoder")
-        self.decoder = session("decoder_merged")
+        self.decoder = session("decoder_merged", decoder_options or options)
         self.processor = load_processor(models_dir)
         self.tokenizer = Tokenizer.from_file(str(models_dir / "tokenizer.json"))
         self.prompt_embeds = np.load(models_dir / "ocr_prompt_embeds.npy")
@@ -98,8 +109,11 @@ class OcrPipeline:
         prefill = self_past is None
         if prefill:
             # The prefill branch ignores the past inputs, but they must still be fed (length 0).
-            empty = np.zeros((len(input_ids), NUM_HEADS, 0, HEAD_DIM), np.float32)
-            self_past, cross = [empty] * len(SELF_KV), [empty] * len(CROSS_KV)
+            n = len(input_ids)
+            self_past = [np.zeros((n, NUM_HEADS, 0, HEAD_DIM), np.float32)] * len(SELF_KV)
+            # Cross keys are stored transposed (batch, heads, head_dim, enc_seq): export/optimize_decoder.py.
+            cross = [np.zeros((n, NUM_HEADS, HEAD_DIM, 0) if kv.endswith("key") else (n, NUM_HEADS, 0, HEAD_DIM),
+                              np.float32) for kv in CROSS_KV]
         feeds = {
             "input_ids": input_ids,
             "encoder_hidden_states": hidden,
@@ -116,7 +130,7 @@ class OcrPipeline:
 
     def generate(self, hidden, mask):
         """Beam search for a batch of images. Returns the generated token ids per image, start token excluded."""
-        n_images, k = len(hidden), NUM_BEAMS
+        n_images, k = len(hidden), self.num_beams
         max_length = 1 + MAX_NEW_TOKENS
 
         # Prefill once per image: the K beams start identical, so copy the result K times afterwards.
@@ -129,7 +143,7 @@ class OcrPipeline:
         # Only the first beam is live at the start, or all K would pick the same tokens.
         beam_scores = np.tile(np.array([0.0] + [-1e9] * (k - 1), np.float32), n_images)
         active = list(range(n_images))  # image index of each group of K rows still generating
-        hyps = [Hypotheses() for _ in range(n_images)]
+        hyps = [Hypotheses(k) for _ in range(n_images)]
         cur_len = 1
 
         while True:

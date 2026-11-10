@@ -24,6 +24,7 @@ Each decision, why it was made, and the evidence. Numbers come from `journal.md`
 | Beam search reimplemented in NumPy, step for step like transformers 4.49 `BeamSearchScorer` | No transformers generation in the server | Identical text |
 | Finished images leave the batch | They would otherwise keep costing decoder work | — |
 | Cross-attention cache kept per image, moved only when an image leaves the batch, not fetched on cached steps | It depends only on the image: the K beams hold identical copies, so per-beam gathers were pure copying | Glue 0.65 s → 0.07 s per request |
+| Decoder graph surgery (`export/optimize_decoder.py`): cross keys stored as Kᵀ by prefill; cached step has no `Transpose` of them and outputs empty tensors instead of `Identity` copies | The profiler showed 2/3 of decoder time was re-transposing and copying a cache that never changes | Decoder 0.88 → 0.39 s; Docker p50 1.2 → 0.94 s, RPS 0.81 → 1.06; text identical to PyTorch |
 
 ## Preprocessing and tokenizer
 
@@ -54,6 +55,20 @@ Each decision, why it was made, and the evidence. Numbers come from `journal.md`
 | 8-bit, not 4-bit, decoder | 4-bit isn't faster, and carries more accuracy risk | 0.85 s vs 0.89 s |
 
 \* 6 synthetic images only. All quantization results must be re-checked on the real samples.
+
+## Tried and rejected
+
+| Option | Result |
+|---|---|
+| Separate (lower) decoder thread count | 3 threads ties 4, fewer is slower once spinning is off |
+| Static int8 QDQ for the vision encoder | 860 ms vs 577 ms dynamic |
+| ORT transformer optimizer fusions on the vision encoder | No attention fusion; 662 ms vs 580 ms int8 |
+| 2 server processes × 2 threads | RPS 1.13 vs 1.06, p50 1.34 s vs 0.94 s |
+| Continuous batching | Not built: batch 2 takes 2× batch 1 on 4 CPUs, so bigger batches add no throughput |
+| 4-bit decoder | Not faster than 8-bit |
+| Vision: `MatMulNBits` 8/4-bit | 1031 / 1142 ms vs 576 ms dynamic int8 |
+| Vision: `ORT_ENABLE_EXTENDED` (no layout conversions) | 580 vs 576 ms |
+| Lower input resolution (640 / 576 / 512) | Text changes already at 640; whole lines lost at 512 |
 
 ## Open
 
