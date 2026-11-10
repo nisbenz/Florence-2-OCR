@@ -21,6 +21,8 @@ from transformers import AutoModelForCausalLM, AutoProcessor
 from transformers.dynamic_module_utils import get_imports
 
 MODEL_ID = "microsoft/Florence-2-base"
+# Pinned so the remote modeling code and weights can't change under us.
+REVISION = "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac"
 OPSET = 17
 
 
@@ -59,9 +61,9 @@ class TextEncoder(torch.nn.Module):
 def load_model():
     with patch("transformers.dynamic_module_utils.get_imports", get_imports_without_flash_attn):
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, trust_remote_code=True, torch_dtype=torch.float32, attn_implementation="eager"
+            MODEL_ID, revision=REVISION, trust_remote_code=True, torch_dtype=torch.float32, attn_implementation="eager"
         ).eval()
-        processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True)
     return model, processor
 
 

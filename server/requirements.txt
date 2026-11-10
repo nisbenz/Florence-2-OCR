@@ -1,7 +1,8 @@
 # Server image. Must never contain torch.
 # transformers is here only for CLIPImageProcessor, which runs without torch.
-fastapi
-uvicorn
+fastapi==0.162.2
+uvicorn==0.54.0
+python-multipart==0.0.33
 onnxruntime==1.31.1
 numpy==2.5.4
 pillow==13.0.0
