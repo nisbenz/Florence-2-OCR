@@ -22,10 +22,14 @@ Florence-2-base, `<OCR>` task, served on CPU with no PyTorch in the server.
 | 2026-11-10 | Baseline: first working server in Docker (`--memory=4g --cpus=4`, MAX_BATCH 2, fp32, ORT default threads) | 100%\* | 9.1 s | 0.17 | ✅ |
 | 2026-11-10 | `ORT_THREADS=4` (intra-op threads = `--cpus`) | 100%\* | 3.5 s | 0.36 | ✅ |
 | 2026-11-10 | int8: dynamic MatMul quantization of both encoders + 8-bit weight-only `MatMulNBits` decoder; threads default to the cgroup quota | 100%\* | 2.5 s | 0.50 | ✅ |
+| 2026-11-10 | Beam search: stop gathering the cross-attention cache per beam and fetching it every step | 100%\* | 2.3 s | 0.56 | ✅ |
+| 2026-11-10 | `session.intra_op.allow_spinning=0` (no spin-waiting under the CPU quota) | 100%\* | 1.2 s | 0.81 | ✅ |
+| 2026-11-10 | `MAX_BATCH=1` instead of 2 (measured, not adopted yet: open decision) | 100%\* | 1.2 s | 0.83 | ⏸ |
 
 \* 6 synthetic images with references from our own PyTorch run (starter repo not released yet).
 `--cpus=4` is a stand-in until the official CPU count is announced. Rows come from
-`bench/docker_bench.sh`. Peak container memory: 3.41 GB, 3.40 GB, then 2.19 GB with int8.
+`bench/docker_bench.sh`. Peak container memory: 3.41 GB, 3.40 GB, 2.19 GB (int8), 2.13 GB, 2.12 GB,
+1.36 GB (batch 1). Design decisions and their reasons: `DESIGN.md`.
 
 ## Problems and how they were solved
 
@@ -40,6 +44,46 @@ Florence-2-base, `<OCR>` task, served on CPU with no PyTorch in the server.
   Text now matches PyTorch exactly, alone and batched.
 
 ## Measurements and notes
+
+### The beam-search glue was the cross-attention cache (2026-11-10)
+
+After int8, 0.65 s of a 2.27 s request was Python/NumPy between decoder steps. Timing each piece at
+real shapes (3 beam rows, 587 encoder tokens):
+
+| Per step | Time |
+|---|---|
+| Gather the cross-attention cache for the surviving beams (12 tensors of 3×12×587×64) | 12.2 ms |
+| Gather the self-attention cache | 0.15 ms |
+| Gather encoder states + mask | 0.19 ms |
+| log-softmax over 51289 tokens | 0.17 ms |
+| top-2k with argpartition | 0.19 ms |
+| no-repeat 3-gram bans | 0.01 ms |
+
+12 ms × 55 steps ≈ the whole 0.65 s. And it was useless work: the cross-attention cache depends only on
+the image, so the K beams of an image hold identical copies and never change after prefill. Beam
+reordering stays inside one image, so the cache only has to move when an image finishes and leaves
+the batch. The decoder also returned the unchanged cache on every step (`present.*.encoder.*`,
+~65 MB copied out of ORT); now a cached step asks only for logits and the self-attention cache.
+
+Glue 0.65 s → 0.07 s, request 2.27 s → 1.66 s (host, 4 threads). Text still identical to PyTorch with
+the fp32 graphs, single and batched (`export/check_pipeline.py`).
+
+### Spin-waiting under a CPU quota (2026-11-10)
+
+ORT's worker threads spin (busy-wait) between parallel sections so they react fast. On a full machine
+that costs nothing, but under `--cpus=4` every spinning microsecond is taken from the same 4-CPU
+budget the working threads need. Decoder steps are tiny and frequent, so threads spin a lot.
+`session.intra_op.allow_spinning=0`: p50 2.3 s → 1.2 s, max RPS 0.56 → 0.81.
+
+### Batch size after these fixes (2026-11-10, Docker `--cpus=4`)
+
+| MAX_BATCH | Max RPS | p50 at concurrency 4 | Peak RAM |
+|---|---|---|---|
+| 1 | 0.83 | 4.9 s | 1.36 GB |
+| 2 | 0.81 | 5.4 s | 2.12 GB |
+
+On 4 threads one image already keeps every core busy, so a batch of 2 takes twice as long as one
+image (3.34 s vs 1.66 s on the host): same throughput, worse latency, more RAM.
 
 ### Quantization, per graph (2026-11-10, `bench/profile_stages.py` + `bench/accuracy_direct.py`, 4 threads, host)
 

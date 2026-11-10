@@ -48,6 +48,9 @@ def cpu_quota() -> int:
 # ignores docker --cpus and oversubscribes the quota (p50 9.1 s vs 3.5 s at --cpus=4), so default
 # to the quota.
 ORT_THREADS = int(os.environ.get("ORT_THREADS", "0")) or cpu_quota()
+# Idle ORT threads spin-wait for work by default (session.intra_op.allow_spinning). Under a --cpus
+# quota the spinning burns CPU time the working threads need: off, p50 2.3 s -> 1.2 s at --cpus=4.
+ORT_SPIN = os.environ.get("ORT_SPIN", "0")
 # Graphs to load as <name>.int8.onnx (export/quantize.py), comma-separated. Empty = all fp32.
 INT8 = {g for g in os.environ.get("INT8", "vision_encoder,text_encoder,decoder_merged").split(",") if g}
 DEADLINE_S = 30.0  # the load test counts anything slower as failed
@@ -135,10 +138,11 @@ async def lifespan(app: FastAPI):
     def load():
         options = ort.SessionOptions()
         options.intra_op_num_threads = ORT_THREADS
+        options.add_session_config_entry("session.intra_op.allow_spinning", ORT_SPIN)
         worker = Worker(OcrPipeline(MODELS_DIR, options, INT8))
         worker.thread.start()
         app.state.worker = worker
-        log.warning("model loaded: %d ORT threads, int8 graphs: %s", ORT_THREADS, sorted(INT8) or "none")
+        log.warning("model loaded: %d ORT threads, spin %s, int8 graphs: %s", ORT_THREADS, ORT_SPIN, sorted(INT8) or "none")
 
     # Load in the background so /health can answer 503 while loading instead of refusing connections.
     loading = asyncio.create_task(asyncio.to_thread(load))

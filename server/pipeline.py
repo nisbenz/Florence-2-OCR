@@ -20,9 +20,10 @@ NUM_BEAMS = 3
 MAX_NEW_TOKENS = 1024
 NO_REPEAT_NGRAM = 3
 NUM_LAYERS, NUM_HEADS, HEAD_DIM = 6, 12, 64
-KV_NAMES = [
-    f"{i}.{part}.{kv}" for i in range(NUM_LAYERS) for part in ("decoder", "encoder") for kv in ("key", "value")
-]
+# Self-attention cache: grows by one token per step, follows the beams.
+SELF_KV = [f"{i}.decoder.{kv}" for i in range(NUM_LAYERS) for kv in ("key", "value")]
+# Cross-attention cache: computed once from the encoder output, identical for every beam of an image.
+CROSS_KV = [f"{i}.encoder.{kv}" for i in range(NUM_LAYERS) for kv in ("key", "value")]
 
 
 def log_softmax(x):
@@ -75,6 +76,8 @@ class OcrPipeline:
         self.processor = load_processor(models_dir)
         self.tokenizer = Tokenizer.from_file(str(models_dir / "tokenizer.json"))
         self.prompt_embeds = np.load(models_dir / "ocr_prompt_embeds.npy")
+        self.self_outputs = ["logits"] + [f"present.{n}" for n in SELF_KV]
+        self.cross_outputs = [f"present.{n}" for n in CROSS_KV]
 
     def __call__(self, images: list[Image.Image]) -> list[str]:
         pixel_values = preprocess(self.processor, images)
@@ -88,19 +91,27 @@ class OcrPipeline:
         text = self.tokenizer.decode(ids.tolist(), skip_special_tokens=False)
         return text.replace("<s>", "").replace("</s>", "")
 
-    def run_decoder(self, input_ids, hidden, mask, past):
-        use_cache = past is not None
-        if not use_cache:
+    def run_decoder(self, input_ids, hidden, mask, self_past=None, cross=None):
+        """Prefill when self_past is None: returns (logits, self cache, cross cache).
+        A cached step returns (logits, self cache) and doesn't fetch the cross cache, which the decoder
+        only passes through unchanged (fetching it would copy ~65 MB out of ONNX Runtime per step)."""
+        prefill = self_past is None
+        if prefill:
             # The prefill branch ignores the past inputs, but they must still be fed (length 0).
-            past = [np.zeros((len(input_ids), NUM_HEADS, 0, HEAD_DIM), np.float32)] * len(KV_NAMES)
+            empty = np.zeros((len(input_ids), NUM_HEADS, 0, HEAD_DIM), np.float32)
+            self_past, cross = [empty] * len(SELF_KV), [empty] * len(CROSS_KV)
         feeds = {
             "input_ids": input_ids,
             "encoder_hidden_states": hidden,
             "encoder_attention_mask": mask,
-            "use_cache_branch": np.array([use_cache]),
-            **{f"past_key_values.{n}": p for n, p in zip(KV_NAMES, past)},
+            "use_cache_branch": np.array([not prefill]),
+            **{f"past_key_values.{n}": p for n, p in zip(SELF_KV, self_past)},
+            **{f"past_key_values.{n}": c for n, c in zip(CROSS_KV, cross)},
         }
-        logits, *present = self.decoder.run(None, feeds)
+        outputs = self.self_outputs + (self.cross_outputs if prefill else [])
+        logits, *present = self.decoder.run(outputs, feeds)
+        if prefill:
+            return logits[:, -1], present[: len(SELF_KV)], present[len(SELF_KV) :]
         return logits[:, -1], present
 
     def generate(self, hidden, mask):
@@ -109,9 +120,10 @@ class OcrPipeline:
         max_length = 1 + MAX_NEW_TOKENS
 
         # Prefill once per image: the K beams start identical, so copy the result K times afterwards.
-        logits, past = self.run_decoder(np.full((n_images, 1), DECODER_START, np.int64), hidden, mask, None)
+        logits, past, cross = self.run_decoder(np.full((n_images, 1), DECODER_START, np.int64), hidden, mask)
         rows = np.repeat(np.arange(n_images), k)
         logits, past, hidden, mask = logits[rows], [p[rows] for p in past], hidden[rows], mask[rows]
+        cross = [c[rows] for c in cross]
 
         seqs = np.full((n_images * k, 1), DECODER_START, np.int64)
         # Only the first beam is live at the start, or all K would pick the same tokens.
@@ -161,9 +173,17 @@ class OcrPipeline:
                         next_tokens.append(token)
                         next_scores.append(score)
 
-            active = still_active
-            if not active:
+            if not still_active:
+                active = still_active
                 break
+            if len(still_active) < len(active):
+                # An image finished: drop its rows from the per-image tensors. This is the only time
+                # they move; beam reordering stays within an image, where all K rows are identical.
+                kept = [g for g, image in enumerate(active) if image in still_active]
+                image_rows = (np.array(kept)[:, None] * k + np.arange(k)).ravel()
+                hidden, mask = hidden[image_rows], mask[image_rows]
+                cross = [c[image_rows] for c in cross]
+            active = still_active
             next_rows = np.array(next_rows)
             seqs = np.concatenate([seqs[next_rows], np.array(next_tokens)[:, None]], axis=1)
             beam_scores = np.array(next_scores, np.float32)
@@ -171,9 +191,8 @@ class OcrPipeline:
             if cur_len >= max_length:
                 break
 
-            hidden, mask = hidden[next_rows], mask[next_rows]
             past = [p[next_rows] for p in past]
-            logits, past = self.run_decoder(seqs[:, -1:], hidden, mask, past)
+            logits, past = self.run_decoder(seqs[:, -1:], hidden, mask, past, cross)
 
         # Images that hit the limit: their open beams count as finished, as in transformers' finalize().
         for g, image in enumerate(active):

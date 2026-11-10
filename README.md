@@ -6,7 +6,8 @@ The goal is to serve the `<OCR>` task with the lowest latency and the highest
 requests per second possible, within 4 GB of RAM, a few CPU threads and no GPU,
 while keeping accuracy at 70% or above against the original model's output.
 
-> Status: first draft. Export, pipeline, server and benchmarks work; see `journal.md`.
+> Status: first draft. Export, pipeline, server and benchmarks work; see `journal.md`
+> for measurements and `DESIGN.md` for the design decisions.
 
 ## Constraints
 
