@@ -1,0 +1,2 @@
+# Bench clients only (accuracy.py, latency.py, load.py). Not part of the server image.
+httpx==0.28.1
