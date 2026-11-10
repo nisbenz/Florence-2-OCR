@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r export/requirements.txt
 COPY export/ export/
 RUN cd export && python export_encoders.py --out /models && python export_decoder.py --out /models \
     && python quantize.py --models /models \
+    && python optimize_decoder.py /models/decoder_merged.onnx /models/decoder_merged.int8.onnx \
     && rm -rf /root/.cache/huggingface
 
 # Stage 2: server. No torch: only ONNX Runtime and the server dependencies.
@@ -19,4 +20,6 @@ COPY --from=export /models /models
 ENV MODELS_DIR=/models PYTHONUNBUFFERED=1
 EXPOSE 8000
 WORKDIR /app/server
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# WORKERS > 1 runs that many server processes, each with its own model copy and queue.
+ENV WORKERS=1
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port 8000 --workers $WORKERS"]

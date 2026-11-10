@@ -26,6 +26,7 @@ def main():
     args = parser.parse_args()
     options = ort.SessionOptions()
     options.intra_op_num_threads = args.threads
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")  # as in the server
     p = OcrPipeline(args.models, options, set(args.int8))
     scores = []
     for path in sorted(args.samples.iterdir()):

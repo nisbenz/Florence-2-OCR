@@ -51,6 +51,10 @@ ORT_THREADS = int(os.environ.get("ORT_THREADS", "0")) or cpu_quota()
 # Idle ORT threads spin-wait for work by default (session.intra_op.allow_spinning). Under a --cpus
 # quota the spinning burns CPU time the working threads need: off, p50 2.3 s -> 1.2 s at --cpus=4.
 ORT_SPIN = os.environ.get("ORT_SPIN", "0")
+# Decoder threads, if different from ORT_THREADS (each decoder step is small, so fewer can be faster).
+ORT_THREADS_DECODER = int(os.environ.get("ORT_THREADS_DECODER", "0")) or ORT_THREADS
+# 3 = Florence-2's default and the reference's setting; 1 = greedy.
+NUM_BEAMS = int(os.environ.get("NUM_BEAMS", "3"))
 # Graphs to load as <name>.int8.onnx (export/quantize.py), comma-separated. Empty = all fp32.
 INT8 = {g for g in os.environ.get("INT8", "vision_encoder,text_encoder,decoder_merged").split(",") if g}
 DEADLINE_S = 30.0  # the load test counts anything slower as failed
@@ -136,13 +140,22 @@ async def lifespan(app: FastAPI):
     app.state.worker = None
 
     def load():
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = ORT_THREADS
-        options.add_session_config_entry("session.intra_op.allow_spinning", ORT_SPIN)
-        worker = Worker(OcrPipeline(MODELS_DIR, options, INT8))
+        def session_options(threads):
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = threads
+            options.add_session_config_entry("session.intra_op.allow_spinning", ORT_SPIN)
+            return options
+
+        pipeline = OcrPipeline(
+            MODELS_DIR, session_options(ORT_THREADS), INT8, session_options(ORT_THREADS_DECODER), NUM_BEAMS
+        )
+        worker = Worker(pipeline)
         worker.thread.start()
         app.state.worker = worker
-        log.warning("model loaded: %d ORT threads, spin %s, int8 graphs: %s", ORT_THREADS, ORT_SPIN, sorted(INT8) or "none")
+        log.warning(
+            "model loaded: %d ORT threads (decoder %d), spin %s, %d beams, int8 graphs: %s",
+            ORT_THREADS, ORT_THREADS_DECODER, ORT_SPIN, NUM_BEAMS, sorted(INT8) or "none",
+        )
 
     # Load in the background so /health can answer 503 while loading instead of refusing connections.
     loading = asyncio.create_task(asyncio.to_thread(load))
