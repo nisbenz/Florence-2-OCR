@@ -36,11 +36,12 @@ def main():
     parser.add_argument("--models", type=Path, default=SERVER.parent / "models")
     parser.add_argument("--threads", type=int, default=0, help="intra-op threads, 0 = ORT default")
     parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--int8", nargs="*", default=[], help="graphs to load as <name>.int8.onnx")
     args = parser.parse_args()
 
     options = ort.SessionOptions()
     options.intra_op_num_threads = args.threads
-    p = pl.OcrPipeline(args.models, options)
+    p = pl.OcrPipeline(args.models, options, set(args.int8))
     image = Image.open(args.image)
     p([image])  # warm-up
 

@@ -6,6 +6,7 @@ COPY export/requirements.txt export/
 RUN pip install --no-cache-dir -r export/requirements.txt
 COPY export/ export/
 RUN cd export && python export_encoders.py --out /models && python export_decoder.py --out /models \
+    && python quantize.py --models /models \
     && rm -rf /root/.cache/huggingface
 
 # Stage 2: server. No torch: only ONNX Runtime and the server dependencies.

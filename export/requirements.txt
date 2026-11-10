@@ -11,3 +11,4 @@ numpy==2.5.4
 pillow==13.0.0
 einops==0.8.2
 timm==1.0.31
+onnx-ir==1.1.0

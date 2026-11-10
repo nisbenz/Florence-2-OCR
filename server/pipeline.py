@@ -62,13 +62,16 @@ class Hypotheses:
 
 
 class OcrPipeline:
-    def __init__(self, models_dir: Path, options: ort.SessionOptions | None = None):
-        def session(name):
-            return ort.InferenceSession(models_dir / name, options, providers=["CPUExecutionProvider"])
+    def __init__(self, models_dir: Path, options: ort.SessionOptions | None = None, int8: set[str] = frozenset()):
+        """int8: graph names ("vision_encoder", "text_encoder", "decoder_merged") to load as <name>.int8.onnx."""
 
-        self.vision = session("vision_encoder.onnx")
-        self.text_encoder = session("text_encoder.onnx")
-        self.decoder = session("decoder_merged.onnx")
+        def session(name):
+            path = models_dir / (f"{name}.int8.onnx" if name in int8 else f"{name}.onnx")
+            return ort.InferenceSession(path, options, providers=["CPUExecutionProvider"])
+
+        self.vision = session("vision_encoder")
+        self.text_encoder = session("text_encoder")
+        self.decoder = session("decoder_merged")
         self.processor = load_processor(models_dir)
         self.tokenizer = Tokenizer.from_file(str(models_dir / "tokenizer.json"))
         self.prompt_embeds = np.load(models_dir / "ocr_prompt_embeds.npy")

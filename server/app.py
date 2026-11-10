@@ -31,9 +31,25 @@ MODELS_DIR = Path(os.environ.get("MODELS_DIR", Path(__file__).resolve().parent.p
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "2"))
 MAX_WAIT_MS = float(os.environ.get("MAX_WAIT_MS", "20"))
 QUEUE_SIZE = int(os.environ.get("QUEUE_SIZE", "32"))
-# ONNX Runtime threads per graph. 0 = ORT default (one per physical core of the host, which ignores
-# docker --cpus and oversubscribes the quota). Set it to the --cpus value.
-ORT_THREADS = int(os.environ.get("ORT_THREADS", "0"))
+
+
+def cpu_quota() -> int:
+    """CPUs allowed by docker --cpus (cgroup v2 cpu.max), else the visible CPU count."""
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, round(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    return os.cpu_count() or 1
+
+
+# ONNX Runtime threads per graph. ORT's own default is one per physical core of the host, which
+# ignores docker --cpus and oversubscribes the quota (p50 9.1 s vs 3.5 s at --cpus=4), so default
+# to the quota.
+ORT_THREADS = int(os.environ.get("ORT_THREADS", "0")) or cpu_quota()
+# Graphs to load as <name>.int8.onnx (export/quantize.py), comma-separated. Empty = all fp32.
+INT8 = {g for g in os.environ.get("INT8", "vision_encoder,text_encoder,decoder_merged").split(",") if g}
 DEADLINE_S = 30.0  # the load test counts anything slower as failed
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
@@ -119,10 +135,10 @@ async def lifespan(app: FastAPI):
     def load():
         options = ort.SessionOptions()
         options.intra_op_num_threads = ORT_THREADS
-        worker = Worker(OcrPipeline(MODELS_DIR, options))
+        worker = Worker(OcrPipeline(MODELS_DIR, options, INT8))
         worker.thread.start()
         app.state.worker = worker
-        log.info("model loaded")
+        log.warning("model loaded: %d ORT threads, int8 graphs: %s", ORT_THREADS, sorted(INT8) or "none")
 
     # Load in the background so /health can answer 503 while loading instead of refusing connections.
     loading = asyncio.create_task(asyncio.to_thread(load))
