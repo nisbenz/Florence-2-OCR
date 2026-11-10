@@ -74,6 +74,5 @@ Each decision, why it was made, and the evidence. Numbers come from `journal.md`
 
 - `MAX_BATCH` 1 vs 2, and `MAX_WAIT_MS`.
 - Max new tokens below 1024 as a latency safety cap.
-- Greedy (`NUM_BEAMS=1`): p50 0.83 s, RPS 1.20 vs 0.94 s / 1.06; 100% on synthetic only. Needs the real samples.
 - Official CPU count (TBA) and evaluation CPU: int8 gains depend on VNNI; re-measure there.
 - Written waiver for the built-in preprocessing.

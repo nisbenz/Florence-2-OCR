@@ -27,7 +27,7 @@ Florence-2-base, `<OCR>` task, served on CPU with no PyTorch in the server.
 | 2026-11-10 | `MAX_BATCH=1` instead of 2 (measured, not adopted yet: open decision) | 100%\* | 1.2 s | 0.83 | ⏸ |
 | 2026-11-10 | Decoder graph surgery: cross keys stored transposed, no per-step `Transpose` / `Identity` copies | 100%\* | 0.94 s | 1.06 | ✅ |
 | 2026-11-10 | Separate decoder threads: 1 / 2 / 3 (encoders stay at 4) | 100%\* | 1.08 / 0.98 / 0.95 s | 0.91 / 1.02 / 1.06 | ❌ |
-| 2026-11-10 | Greedy decoding (`NUM_BEAMS=1`) instead of 3 beams (open decision: needs real samples) | 100%\* | 0.83 s | 1.20 | ⏸ |
+| 2026-11-10 | Greedy decoding (`NUM_BEAMS=1`) instead of 3 beams | 100%\* | 0.83 s | 1.20 | ❌ |
 | 2026-11-10 | 2 server processes × 2 threads (`WORKERS=2`, `MAX_BATCH=1`) | 100%\* | 1.34 s | 1.13 | ❌ |
 
 \* 6 synthetic images with references from our own PyTorch run (starter repo not released yet).
@@ -122,8 +122,8 @@ landing unevenly on the two processes). Not worth the latency on 4 CPUs.
 batch 2 takes exactly twice as long as batch 1. Revisit if the official CPU count is much larger.
 
 **Greedy decoding** is faster (p50 0.94 → 0.83 s, RPS 1.06 → 1.20) and scored 100% here, but the
-synthetic images are easy; greedy can drift from the beam-search reference on real text. Decide with
-the real samples.
+synthetic images are easy; greedy can drift from the beam-search reference on real text.
+Decision: always 3-beam search. Accuracy comes before the ~0.1 s.
 
 ### Profiling the decoder with ONNX Runtime's profiler (2026-11-10, `bench/ort_profile.py`)
 
