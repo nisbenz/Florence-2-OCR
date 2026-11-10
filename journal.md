@@ -49,6 +49,50 @@ Florence-2-base, `<OCR>` task, served on CPU with no PyTorch in the server.
 
 ## Measurements and notes
 
+### The vision encoder (2026-11-10)
+
+It is now about half of a request (0.58 s of ~1.1 s on 4 threads). ORT profile, one image, int8:
+
+| Part | Time |
+|---|---|
+| Stage 0 (192×192 feature map) | 109 ms |
+| Stage 1 | 54 ms |
+| Stage 2 (deepest, most blocks) | 273 ms |
+| Stage 3 | 23 ms |
+| Conv patch embeddings | 37 ms |
+| Other (fused / unnamed nodes) | 95 ms |
+
+Window attention 255 ms and channel attention 204 ms. No single hotspot like the decoder's: the
+largest nodes are three 11 ms Convs, then `DynamicQuantizeMatMul` (≈43% overall) spread over 97
+layers. It is real math, not redundant work.
+
+| Tried | Time | Mean abs diff vs fp32 | Verdict |
+|---|---|---|---|
+| Dynamic int8 (current) | 576 ms | 0.147 | kept |
+| Same, `ORT_ENABLE_EXTENDED` (no NCHWc layout conversions) | 580 ms | 0.146 | ❌ no gain |
+| Weight-only `MatMulNBits` 8-bit | 1031 ms | 0.022 | ❌ slower (kernel built for small-M decoding) |
+| Weight-only `MatMulNBits` 4-bit | 1142 ms | 0.190 | ❌ |
+| Static QDQ int8 (earlier) | 860 ms | — | ❌ |
+| Transformer optimizer fusions (earlier) | 662 ms | — | ❌ |
+
+Note: dynamic int8 is the noisiest of these (mean diff 0.147 vs 0.022 for 8-bit `MatMulNBits`).
+Fine on the synthetic images, but it is the first thing to suspect if accuracy drops on real samples.
+
+**Lower input resolution**, checked in PyTorch before exporting anything (vision time in PyTorch fp32):
+
+| Size | Image tokens | Vision time | Text vs 768 reference (3 synthetic images) |
+|---|---|---|---|
+| 768 | 577 | 1.36 s | identical |
+| 640 | 401 | 0.97 s | 1 of 3 changed (`42.50` → `42:50`) |
+| 576 | 325 | 0.73 s | 3 of 3 changed: lowercased, parts dropped |
+| 512 | 257 | 0.61 s | 3 of 3 changed: whole lines missing |
+
+The model was trained at 768 and its reading degrades fast below it, even on large clean synthetic
+text. A missing line costs far more CER than the time saved. Rejected.
+
+Conclusion: with ONNX Runtime on CPU, the vision encoder is close to its floor here. What's left is
+thread count (it scales with threads, unlike the decoder) on the official CPU count.
+
 ### Sustained load, 10 minutes (2026-11-10, Docker `--cpus=4`, concurrency 4)
 
 628 requests, 100% success, 1.04 RPS, 0 errors in the server log. Container memory per minute:

@@ -66,6 +66,9 @@ Each decision, why it was made, and the evidence. Numbers come from `journal.md`
 | 2 server processes × 2 threads | RPS 1.13 vs 1.06, p50 1.34 s vs 0.94 s |
 | Continuous batching | Not built: batch 2 takes 2× batch 1 on 4 CPUs, so bigger batches add no throughput |
 | 4-bit decoder | Not faster than 8-bit |
+| Vision: `MatMulNBits` 8/4-bit | 1031 / 1142 ms vs 576 ms dynamic int8 |
+| Vision: `ORT_ENABLE_EXTENDED` (no layout conversions) | 580 vs 576 ms |
+| Lower input resolution (640 / 576 / 512) | Text changes already at 640; whole lines lost at 512 |
 
 ## Open
 
