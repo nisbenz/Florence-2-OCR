@@ -1,0 +1,6 @@
+models/
+**/.venv/
+**/__pycache__/
+.git/
+PLAN.md
+CONVERSATION.md

@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import onnxruntime as ort
 from fastapi import FastAPI, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -30,6 +31,9 @@ MODELS_DIR = Path(os.environ.get("MODELS_DIR", Path(__file__).resolve().parent.p
 MAX_BATCH = int(os.environ.get("MAX_BATCH", "2"))
 MAX_WAIT_MS = float(os.environ.get("MAX_WAIT_MS", "20"))
 QUEUE_SIZE = int(os.environ.get("QUEUE_SIZE", "32"))
+# ONNX Runtime threads per graph. 0 = ORT default (one per physical core of the host, which ignores
+# docker --cpus and oversubscribes the quota). Set it to the --cpus value.
+ORT_THREADS = int(os.environ.get("ORT_THREADS", "0"))
 DEADLINE_S = 30.0  # the load test counts anything slower as failed
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
@@ -113,7 +117,9 @@ async def lifespan(app: FastAPI):
     app.state.worker = None
 
     def load():
-        worker = Worker(OcrPipeline(MODELS_DIR))
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = ORT_THREADS
+        worker = Worker(OcrPipeline(MODELS_DIR, options))
         worker.thread.start()
         app.state.worker = worker
         log.info("model loaded")
