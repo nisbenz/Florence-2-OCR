@@ -175,6 +175,11 @@ async def bad_request(request, exc):
 
 @app.get("/health")
 async def health():
+    """Ok once the model is loaded, 503 "loading" before that.
+
+    Performance: milliseconds. It only checks a flag and never touches the model or the queue, so it
+    stays responsive under load. Ok ~3 s after the container starts (limit 120 s). See PERFORMANCE.md.
+    """
     if app.state.worker is None:
         return JSONResponse({"status": "loading"}, status_code=503)
     return {"status": "ok"}
@@ -182,6 +187,16 @@ async def health():
 
 @app.post("/ocr")
 async def ocr(image: UploadFile):
+    """Image in (multipart field `image`, JPEG or PNG, 10 MB max), `{"text": ...}` out.
+
+    Performance (Docker, --memory=4g --cpus=4, 2026-11-10, journal.md):
+    - latency p50 0.94 s one request at a time; ~5 s at concurrency 4; p95/p99 not logged yet
+    - max 1.06 RPS at >= 99% success; 1.04 RPS sustained for 10 min, 0 errors, memory flat at ~2 GB
+    - per image: vision encoder ~0.58 s, text encoder ~0.07 s, decoder ~0.39 s + beam glue ~0.07 s
+    - accuracy: 3-beam search, text identical to the PyTorch model (100% on 6 synthetic images)
+    - 503 at once when the queue (32) is full or the 30 s deadline can't be met; 400/413 never run inference
+    See PERFORMANCE.md.
+    """
     worker = app.state.worker
     if worker is None:
         return JSONResponse({"error": "model is still loading"}, status_code=503)
